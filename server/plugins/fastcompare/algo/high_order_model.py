@@ -76,23 +76,29 @@ class HigherOrderEASE(AlgorithmBase, ABC):
         Gamma = tf.Variable(tf.zeros((self._m, self._items_count)))
 
         # ADMM iterations
-        for _ in range(40):
+        for iteration in range(40):
+            print(f"ADMM Iteration: {iteration + 1}")
+
             # Update B
+            print("Updating B...")
             B_update = tf.subtract(tf.eye(self._items_count),
                                    P @ (tf.transpose(X) @ Z @ C - tf.linalg.diag(
                                        tf.reduce_sum(P @ (tf.transpose(X) @ Z @ C), axis=1))))
             B.assign(B_update)
 
             # Update C
+            print("Updating C...")
             C_update = tf.linalg.inv(tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(self._m)) @ (
                     tf.transpose(Z) @ X @ (tf.eye(self._items_count) - B) + self._rho * (D - Gamma))
             C.assign(C_update)
 
             # Update D
+            print("Updating D...")
             D_update = tf.multiply((1 - M), C)
             D.assign(D_update)
 
             # Update Gamma
+            print("Updating Gamma...")
             Gamma_update = Gamma + C - D
             Gamma.assign(Gamma_update)
 
@@ -145,19 +151,19 @@ class HigherOrderEASE(AlgorithmBase, ABC):
             Parameter(
                 "l2_C",
                 ParameterType.FLOAT,
-                500.0,
+                0.1,
                 help="L2-norm regularization for triplet weights",
             ),
             Parameter(
                 "rho",
                 ParameterType.FLOAT,
-                1.0,
+                0.1,
                 help="Penalty parameter for ADMM",
             ),
             Parameter(
                 "m",
                 ParameterType.INT,
-                40000,
+                500,  # Keep the number to 500 for memory to fit in
                 help="Number of triplet relations",
             ),
             Parameter(
