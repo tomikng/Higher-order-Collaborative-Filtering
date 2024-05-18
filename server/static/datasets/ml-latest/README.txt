@@ -1,7 +1,7 @@
 Summary
 =======
 
-This dataset (ml-latest) describes 5-star rating and free-text tagging activity from [MovieLens](http://movielens.org), a movie recommendation service. It contains 27753444 ratings and 1108997 tag applications across 58098 movies. These data were created by 283228 users between January 09, 1995 and September 26, 2018. This dataset was generated on September 26, 2018.
+This dataset (ml-latest) describes 5-star rating and free-text tagging activity from [MovieLens](http://movielens.org), a movie recommendation service. It contains 33832162 ratings and 2328315 tag applications across 86537 movies. These data were created by 330975 users between January 09, 1995 and July 20, 2023. This dataset was generated on July 20, 2023.
 
 Users were selected at random for inclusion. All selected users had rated at least 1 movies. No demographic information is included. Each user is represented by an id, and no other information is provided.
 
@@ -19,7 +19,7 @@ Neither the University of Minnesota nor any of the researchers involved can guar
 
 * The user may not state or imply any endorsement from the University of Minnesota or the GroupLens Research Group.
 * The user must acknowledge the use of the data set in publications resulting from the use of the data set (see below for citation information).
-* The user may not redistribute the data without separate permission.
+* The user may redistribute the data set, including transformations, so long as it is distributed under these same license conditions.
 * The user may not use this information for any commercial or revenue-bearing purposes without first obtaining permission from a faculty member of the GroupLens Research Project at the University of Minnesota.
 * The executable software scripts are provided "as is" without warranty of any kind, either expressed or implied, including, but not limited to, the implied warranties of merchantability and fitness for a particular purpose. The entire risk as to the quality and performance of them is with you. Should the program prove defective, you assume the cost of all necessary servicing, repair or correction.
 
