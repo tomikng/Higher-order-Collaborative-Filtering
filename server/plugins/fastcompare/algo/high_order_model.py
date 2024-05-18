@@ -9,8 +9,12 @@ from plugins.fastcompare.algo.algorithm_base import (
 )
 
 
-class HigherOrderModel(AlgorithmBase, ABC):
-    def __init__(self, loader, l2_b, l2_c, rho, threshold, **kwargs):
+class HigherOrderEASE(AlgorithmBase, ABC):
+    """Implementation of Higher-Order EASE algorithm for EasyStudy using ADMM optimization
+    paper: https://dl.acm.org/doi/pdf/10.1145/3460231.3474273
+    """
+
+    def __init__(self, loader, positive_threshold, l2_B, l2_C, rho, m, **kwargs):
         self._ratings_df = loader.ratings_df
         self._loader = loader
         self._all_items = self._ratings_df.item.unique()
@@ -21,68 +25,79 @@ class HigherOrderModel(AlgorithmBase, ABC):
             .values
         )
 
-        self._l2_b = l2_b
-        self._l2_c = l2_c
+        self._threshold = positive_threshold
+        self._l2_B = l2_B
+        self._l2_C = l2_C
         self._rho = rho
-        self._threshold = threshold
+        self._m = m
 
-        self._num_users, self._num_items = np.shape(self._rating_matrix)
-        self._pairwise_matrix = None
-        self._higher_order_matrix = None
+        self._items_count = np.shape(self._rating_matrix)[1]
+
+        self._pair_weights = None
+        self._triplet_weights = None
+
+    def _get_higher_order_data(self):
+        # Apply threshold to item-item matrix to get most frequent pairs
+        item_item_matrix = np.where(self._rating_matrix.T @ self._rating_matrix >= self._threshold, 1, 0)
+        # Get indices of m most frequent pairs
+        pair_indices = np.argpartition(item_item_matrix, -self._m, axis=None)[-self._m:]
+        pair_indices = np.vstack(np.unravel_index(pair_indices, item_item_matrix.shape)).T
+
+        # Create M matrix indicating selected pairs
+        M = np.zeros((self._m, self._items_count))
+        for idx, (i, j) in enumerate(pair_indices):
+            M[idx, i] = 1
+            M[idx, j] = 1
+
+        # Generate higher-order training data Z
+        Z = self._rating_matrix @ M.T
+        Z = np.where(Z >= 2, 1, 0)
+
+        return M, Z
 
     def fit(self):
         X = tf.convert_to_tensor(
             np.where(self._rating_matrix >= self._threshold, 1, 0), dtype=tf.float32
         )
-        X_T = tf.transpose(X)
 
-        # Compute pairwise relations
-        G = X_T @ X + self._l2_b * tf.eye(self._num_items)
+        M, Z = self._get_higher_order_data()
+        M = tf.convert_to_tensor(M, dtype=tf.float32)
+        Z = tf.convert_to_tensor(Z, dtype=tf.float32)
+
+        G = tf.transpose(X) @ X
+        G += self._l2_B * tf.eye(self._items_count)
+
         P = tf.linalg.inv(G)
-        B = P / (-tf.linalg.tensor_diag_part(P))
-        B = tf.linalg.set_diag(B, tf.zeros(B.shape[0]))
 
-        # Compute higher-order relations
-        Z, actual_num_relations = self._create_higher_order_matrix(X)
-        C = self._train_higher_order(X, Z, B, actual_num_relations)
+        # Initialize matrices
+        B = tf.Variable(tf.zeros((self._items_count, self._items_count)))
+        C = tf.Variable(tf.zeros((self._m, self._items_count)))
+        D = tf.Variable(tf.zeros((self._m, self._items_count)))
+        Gamma = tf.Variable(tf.zeros((self._m, self._items_count)))
 
-        self._pairwise_matrix = B.numpy()
-        self._higher_order_matrix = C.numpy()
+        # ADMM iterations
+        for _ in range(40):
+            # Update B
+            B_update = tf.subtract(tf.eye(self._items_count),
+                                   P @ (tf.transpose(X) @ Z @ C - tf.linalg.diag(
+                                       tf.reduce_sum(P @ (tf.transpose(X) @ Z @ C), axis=1))))
+            B.assign(B_update)
 
-    def _create_higher_order_matrix(self, X):
-        max_relations = 40000  # Example, adjust this according to needs
-        Z = np.zeros((self._num_users, max_relations))
+            # Update C
+            C_update = tf.linalg.inv(tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(self._m)) @ (
+                    tf.transpose(Z) @ X @ (tf.eye(self._items_count) - B) + self._rho * (D - Gamma))
+            C.assign(C_update)
 
-        relation_counter = 0
-        for user_index in range(self._num_users):
-            interactions = np.nonzero(X[user_index, :])[0]
-            if len(interactions) < 2:
-                continue
-            for i in range(len(interactions)):
-                for j in range(i + 1, len(interactions)):
-                    if relation_counter >= max_relations:
-                        break
-                    # Simplified higher-order interaction (e.g., pair of items)
-                    Z[user_index, relation_counter] = 1
-                    relation_counter += 1
+            # Update D
+            D_update = tf.multiply((1 - M), C)
+            D.assign(D_update)
 
-        return tf.convert_to_tensor(Z[:, :relation_counter], dtype=tf.float32), relation_counter
+            # Update Gamma
+            Gamma_update = Gamma + C - D
+            Gamma.assign(Gamma_update)
 
-    def _train_higher_order(self, X, Z, B, num_relations):
-        m = num_relations
-        C = tf.Variable(tf.zeros((m, self._num_items)), dtype=tf.float32)
-        D = tf.Variable(tf.zeros((m, self._num_items)), dtype=tf.float32)
-        Γ = tf.Variable(tf.zeros((m, self._num_items)), dtype=tf.float32)
-
-        for _ in range(40):  # Number of ADMM iterations
-            B_inv = tf.linalg.inv(tf.transpose(X) @ X + self._l2_b * tf.eye(self._num_items))
-            C.assign(B_inv @ (tf.transpose(X) @ (X - Z @ C) - Γ / self._rho))
-
-            D.assign(tf.where(Z == 0, C, 0))
-
-            Γ.assign(Γ + self._rho * (C - D))
-
-        return C
+        self._pair_weights = B
+        self._triplet_weights = C
 
     def predict(self, selected_items, filter_out_items, k):
         rat = pd.DataFrame({"item": selected_items}).set_index("item", drop=False)
@@ -92,29 +107,63 @@ class HigherOrderModel(AlgorithmBase, ABC):
         if not selected_items:
             return np.random.choice(candidates, size=k, replace=False).tolist()
 
-        user_vector = np.zeros((self._num_items,))
-        for item in selected_items:
-            user_vector[item] = 1.0
+        indices = list(selected_items)
+        user_vector = np.zeros((self._items_count,))
+        for i in indices:
+            user_vector[i] = 1.0
 
-        user_vector_tf = tf.convert_to_tensor(user_vector, dtype=tf.float32)
-        pairwise_scores = tf.tensordot(user_vector_tf, self._pairwise_matrix, 1).numpy()
-        higher_order_scores = tf.tensordot(user_vector_tf, self._higher_order_matrix, 1).numpy()
+        _, Z = self._get_higher_order_data()
 
-        combined_scores = pairwise_scores + higher_order_scores
-        candidates_by_prob = sorted(((combined_scores[cand], cand) for cand in candidates), reverse=True)
-        result = [x for _, x in candidates_by_prob][:k]
+        preds = (
+                tf.tensordot(
+                    tf.convert_to_tensor(user_vector, dtype=tf.float32), self._pair_weights, 1
+                )
+                + tf.tensordot(
+            tf.convert_to_tensor(Z, dtype=tf.float32), self._triplet_weights, 1
+        )
+        ).numpy()
+
+        candidate_scores = np.take(preds, candidates)
+        top_indices = np.argsort(-candidate_scores)[:k]
+        result = candidates[top_indices].tolist()
 
         return result
 
     @classmethod
     def name(cls):
-        return "HigherOrderModel"
+        return "Higher-Order EASE"
 
     @classmethod
     def parameters(cls):
         return [
-            Parameter("l2_b", ParameterType.FLOAT, 0.1, help="L2-norm regularization for B"),
-            Parameter("l2_c", ParameterType.FLOAT, 0.1, help="L2-norm regularization for C"),
-            Parameter("rho", ParameterType.FLOAT, 1.0, help="Penalty parameter for ADMM"),
-            Parameter("threshold", ParameterType.FLOAT, 0.5, help="Threshold for binary rating conversion"),
+            Parameter(
+                "l2_B",
+                ParameterType.FLOAT,
+                500.0,
+                help="L2-norm regularization for pairwise weights",
+            ),
+            Parameter(
+                "l2_C",
+                ParameterType.FLOAT,
+                500.0,
+                help="L2-norm regularization for triplet weights",
+            ),
+            Parameter(
+                "rho",
+                ParameterType.FLOAT,
+                1.0,
+                help="Penalty parameter for ADMM",
+            ),
+            Parameter(
+                "m",
+                ParameterType.INT,
+                40000,
+                help="Number of triplet relations",
+            ),
+            Parameter(
+                "positive_threshold",
+                ParameterType.FLOAT,
+                2.5,
+                help="Threshold for conversion of n-ary rating into binary (positive/negative).",
+            ),
         ]
