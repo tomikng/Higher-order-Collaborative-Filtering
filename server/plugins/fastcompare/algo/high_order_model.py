@@ -62,9 +62,6 @@ class HigherOrderEASE(EASE, ABC):
         return selected_pairs
 
     def _create_M_matrix(self, S):
-        """
-        Creates the M matrix from the set of selected higher-order relations S.
-        """
         print("Creating M matrix...")
         M = np.zeros((len(S), self._items_count), dtype=np.float32)
         for r, (i, k) in enumerate(S):
@@ -142,7 +139,6 @@ class HigherOrderEASE(EASE, ABC):
 
     def predict(self, selected_items, filter_out_items, k):
         print("Generating predictions using Higher-Order EASE model...")
-        # Step 4: Create a DataFrame for candidate items
         rat = pd.DataFrame({"item": selected_items}).set_index("item", drop=False)
 
         # Filter out seen and excluded items
@@ -152,16 +148,14 @@ class HigherOrderEASE(EASE, ABC):
         # If no items selected, return random candidates
         if not selected_items:
             return np.random.choice(candidates, size=k, replace=False).tolist()
-        # Step 1: Create user interaction vector
         user_vector = np.zeros((self._items_count,), dtype=np.float32)
         indices = list(selected_items)
         for i in indices:
             user_vector[i] = 1.0
 
-        # Step 2: Compute pairwise predictions
         pairwise_preds = np.dot(user_vector, self._weights)
 
-        # Step 3: Compute higher-order predictions
+        # Compute higher-order predictions
         Z_u = np.dot(user_vector, self._M.T) >= 2
         higher_order_preds = np.dot(Z_u.astype(np.float32), self._C)
 
@@ -173,7 +167,6 @@ class HigherOrderEASE(EASE, ABC):
         )
         result = [x for _, x in candidates_by_prob][:k]
 
-        # Return top-k item IDs
         return result
 
     @classmethod
