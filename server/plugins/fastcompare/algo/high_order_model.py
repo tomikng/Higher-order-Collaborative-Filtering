@@ -11,13 +11,20 @@ class HigherOrderEASE(EASE, ABC):
     paper: https://dl.acm.org/doi/pdf/10.1145/3460231.3474273
     """
 
-    def __init__(self, loader, positive_threshold, l2, l2_C, rho, m, **kwargs):
+    def __init__(self, loader, positive_threshold, l2, l2_C, rho, m, latent_dim=10, **kwargs):
         super().__init__(loader, positive_threshold, l2, **kwargs)
         self._M = None
         self._C = None
         self._l2_C = l2_C
         self._rho = rho
         self._m = m
+        self._latent_dim = latent_dim
+        self._initialize_latent_factors()
+
+    def _initialize_latent_factors(self):
+        """Initialize the latent factors for the triplet interactions."""
+        self._nu = np.random.normal(size=(self._items_count, self._latent_dim)).astype(np.float32)
+        self._gamma = np.random.normal(size=(self._items_count, self._latent_dim)).astype(np.float32)
 
     def fit(self):
         print("Training Higher-Order EASE model...")
@@ -76,7 +83,7 @@ class HigherOrderEASE(EASE, ABC):
         print("Generating higher-order data...")
         M = tf.convert_to_tensor(M, dtype=tf.float32)  # Convert M to float32
         Z = tf.matmul(X, tf.transpose(M))
-        Z = tf.where(Z >= 2.5, 1, 0)  # Apply thresholding
+        Z = tf.where(Z >= 2, 1, 0)  # Apply thresholding
         return Z
 
     def _train_higher_order_model(self, X, Z, M):
@@ -143,52 +150,33 @@ class HigherOrderEASE(EASE, ABC):
     def predict(self, selected_items, filter_out_items, k):
         print("Generating predictions using Higher-Order EASE model...")
 
-        # Section 3.5
-        user_vector = np.zeros((self._items_count,), dtype=np.float32)
-        for i in selected_items:
-            user_vector[i] = 1.0
+        # Create user interaction vector (2-dimensional)
+        user_vector = np.zeros((1, self._items_count), dtype=np.float32)
+        for item_id in selected_items:
+            user_vector[0, item_id] = 1.0  # Set the corresponding element to 1
 
-        # Ensure self._M is of type float32
-        M = tf.convert_to_tensor(self._M, dtype=tf.float32)
+        # Pairwise predictions
+        pairwise_preds = user_vector @ self._weights
 
-        # Reshape user_vector to be 2D (self._items_count, 1) for matrix multiplication
-        user_vector_2d = tf.expand_dims(user_vector, axis=-1)
+        # Higher-order predictions
+        Z_u = (user_vector @ self._M.T >= 2).astype(np.float32)
+        higher_order_preds = Z_u @ self._C
 
-        # Print shapes for debugging
-        print(f"user_vector shape: {user_vector.shape}")
-        print(f"user_vector_2d shape: {user_vector_2d.shape}")
-        print(f"M shape: {M.shape}")
+        # Combine predictions
+        preds = pairwise_preds + higher_order_preds
 
-        # Perform matrix multiplication
-        Z_u = tf.matmul(M, user_vector_2d)
+        # Filter out selected and excluded items
+        candidate_items = np.setdiff1d(self._all_items, selected_items)
+        candidate_items = np.setdiff1d(candidate_items, filter_out_items)
 
-        # Squeeze Z_u to remove the last dimension
-        Z_u = tf.squeeze(Z_u, axis=-1)
+        # Get predicted scores for candidate items
+        candidate_scores = preds.numpy()[0, candidate_items] # Extract scores from the row vector
 
-        # Print shape of Z_u for debugging
-        print(f"Z_u shape: {Z_u.shape}")
+        # Get indices of top-k items
+        top_k_indices = np.argsort(candidate_scores)[::-1][:k]
 
-        # Calculate predictions
-        preds = tf.tensordot(
-            tf.convert_to_tensor(user_vector, dtype=tf.float32), self._weights, 1
-        ) + tf.tensordot(
-            Z_u, self._C, 1
-        )
-
-        # Print shapes for debugging
-        print(f"self._weights shape: {self._weights.shape}")
-        print(f"self._C shape: {self._C.shape}")
-        print(f"preds shape: {preds.shape}")
-
-        candidates = np.setdiff1d(self._all_items, selected_items)
-        candidates = np.setdiff1d(candidates, filter_out_items)
-
-        preds_candidates = preds.numpy()[candidates]
-        top_k_indices = np.argsort(preds_candidates)[::-1][:k]
-        result = candidates[top_k_indices].tolist()
-
-        print(f"Generated {k} predictions using Higher-Order EASE model.")
-        return result
+        # Return top-k item IDs
+        return candidate_items[top_k_indices]
 
     @classmethod
     def name(cls):
@@ -215,6 +203,12 @@ class HigherOrderEASE(EASE, ABC):
                 ParameterType.INT,
                 500,
                 help="Number of higher-order relations to consider",
+            ),
+            Parameter(
+                "latent_dim",
+                ParameterType.INT,
+                10,
+                help="Dimensionality of the latent factors for triplet interactions",
             ),
         ]
         return base_params + higher_order_params
