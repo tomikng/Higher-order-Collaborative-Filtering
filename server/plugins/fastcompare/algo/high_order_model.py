@@ -1,6 +1,7 @@
 from abc import ABC
 import numpy as np
 import tensorflow as tf
+import pandas as pd
 
 from server.plugins.fastcompare.algo.algorithm_base import ParameterType, Parameter
 from server.plugins.fastcompare.algo.ease import EASE
@@ -141,34 +142,39 @@ class HigherOrderEASE(EASE, ABC):
 
     def predict(self, selected_items, filter_out_items, k):
         print("Generating predictions using Higher-Order EASE model...")
+        # Step 4: Create a DataFrame for candidate items
+        rat = pd.DataFrame({"item": selected_items}).set_index("item", drop=False)
 
-        # Create user interaction vector (2-dimensional)
-        user_vector = np.zeros((1, self._items_count), dtype=np.float32)
-        for item_id in selected_items:
-            user_vector[0, item_id] = 1.0  # Set the corresponding element to 1
+        # Filter out seen and excluded items
+        candidates = np.setdiff1d(self._all_items, rat.item.unique())
+        candidates = np.setdiff1d(candidates, filter_out_items)
 
-        # Pairwise predictions
-        pairwise_preds = user_vector @ self._weights
+        # If no items selected, return random candidates
+        if not selected_items:
+            return np.random.choice(candidates, size=k, replace=False).tolist()
+        # Step 1: Create user interaction vector
+        user_vector = np.zeros((self._items_count,), dtype=np.float32)
+        indices = list(selected_items)
+        for i in indices:
+            user_vector[i] = 1.0
 
-        # Higher-order predictions
-        Z_u = (user_vector @ self._M.T >= 2).astype(np.float32)
-        higher_order_preds = Z_u @ self._C
+        # Step 2: Compute pairwise predictions
+        pairwise_preds = np.dot(user_vector, self._weights)
 
-        # Combine predictions
+        # Step 3: Compute higher-order predictions
+        Z_u = np.dot(user_vector, self._M.T) >= 2
+        higher_order_preds = np.dot(Z_u.astype(np.float32), self._C)
+
+        # Combine pairwise and higher-order predictions
         preds = pairwise_preds + higher_order_preds
 
-        # Filter out selected and excluded items
-        candidate_items = np.setdiff1d(self._all_items, selected_items)
-        candidate_items = np.setdiff1d(candidate_items, filter_out_items)
-
-        # Get predicted scores for candidate items
-        candidate_scores = preds.numpy()[0, candidate_items]
-
-        # Get indices of top-k items
-        top_k_indices = np.argsort(candidate_scores)[::-1][:k]
+        candidates_by_prob = sorted(
+            ((preds[cand], cand) for cand in candidates), reverse=True
+        )
+        result = [x for _, x in candidates_by_prob][:k]
 
         # Return top-k item IDs
-        return candidate_items[top_k_indices]
+        return result
 
     @classmethod
     def name(cls):
