@@ -1,138 +1,179 @@
 from abc import ABC
 import numpy as np
-import pandas as pd
 import tensorflow as tf
-from plugins.fastcompare.algo.algorithm_base import (
-    AlgorithmBase,
-    Parameter,
-    ParameterType,
-)
+
+from server.plugins.fastcompare.algo.algorithm_base import ParameterType, Parameter
+from server.plugins.fastcompare.algo.ease import EASE
 
 
-class HigherOrderEASE(AlgorithmBase, ABC):
+class HigherOrderEASE(EASE, ABC):
     """Implementation of Higher-Order EASE algorithm for EasyStudy using ADMM optimization
     paper: https://dl.acm.org/doi/pdf/10.1145/3460231.3474273
     """
 
-    def __init__(self, loader, positive_threshold, l2_B, l2_C, rho, m, **kwargs):
-        self._ratings_df = loader.ratings_df
-        self._loader = loader
-        self._all_items = self._ratings_df.item.unique()
-
-        self._rating_matrix = (
-            self._loader.ratings_df.pivot(index="user", columns="item", values="rating")
-            .fillna(0)
-            .values
-        )
-
-        self._threshold = positive_threshold
-        self._l2_B = l2_B
+    def __init__(self, loader, positive_threshold, l2, l2_C, rho, m, **kwargs):
+        super().__init__(loader, positive_threshold, l2, **kwargs)
+        self._M = None
+        self._C = None
         self._l2_C = l2_C
         self._rho = rho
         self._m = m
 
-        self._items_count = np.shape(self._rating_matrix)[1]
-
-        self._pair_weights = None
-        self._triplet_weights = None
-
-    def _get_higher_order_data(self):
-        # Apply threshold to item-item matrix to get most frequent pairs
-        item_item_matrix = np.where(self._rating_matrix.T @ self._rating_matrix >= self._threshold, 1, 0)
-        # Get indices of m most frequent pairs
-        pair_indices = np.argpartition(item_item_matrix, -self._m, axis=None)[-self._m:]
-        pair_indices = np.vstack(np.unravel_index(pair_indices, item_item_matrix.shape)).T
-
-        # Create M matrix indicating selected pairs
-        M = np.zeros((self._m, self._items_count))
-        for idx, (i, j) in enumerate(pair_indices):
-            M[idx, i] = 1
-            M[idx, j] = 1
-
-        # Generate higher-order training data Z
-        Z = self._rating_matrix @ M.T
-        Z = np.where(Z >= 2, 1, 0)
-
-        return M, Z
-
     def fit(self):
+        print("Training Higher-Order EASE model...")
+        super().fit()
+
+        # Reference: Section 3.1 Data Representation
         X = tf.convert_to_tensor(
             np.where(self._rating_matrix >= self._threshold, 1, 0), dtype=tf.float32
         )
+        item_item_matrix = tf.transpose(X) @ X
+        S = self._select_higher_order_relations(item_item_matrix, self._m)
+        self._M = self._create_M_matrix(S)
 
-        M, Z = self._get_higher_order_data()
-        M = tf.convert_to_tensor(M, dtype=tf.float32)
-        Z = tf.convert_to_tensor(Z, dtype=tf.float32)
+        # Reference: Section 3.2 Training Objective and Section 3.3 Update Equations for Training
+        Z = self._generate_higher_order_data(X, self._M)
+        self._C = self._train_higher_order_model(X, Z, self._M)
+        print("Higher-Order EASE model trained successfully.")
 
-        G = tf.transpose(X) @ X
-        G += self._l2_B * tf.eye(self._items_count)
+    def _select_higher_order_relations(self, item_item_matrix, m):
+        # Reference: Section 5.1 Experimental Protocols
+        print(f"Selecting {m} higher-order relations...")
+        upper_tri_indices = np.triu_indices(self._items_count, k=1)
+        upper_tri_indices = tf.convert_to_tensor(upper_tri_indices, dtype=tf.int64)  # Convert to TensorFlow tensor
+        item_item_scores = tf.gather_nd(item_item_matrix, tf.transpose(upper_tri_indices))  # Use tf.gather_nd to index
+        top_indices = tf.argsort(item_item_scores, direction='DESCENDING')[:m]
+        top_item_pairs = tf.gather(tf.transpose(upper_tri_indices), top_indices)
+        return set(tuple(pair.numpy()) for pair in top_item_pairs)
 
-        P = tf.linalg.inv(G)
+    def _create_M_matrix(self, S):
+        # Reference: Section 3.1 Data Representation
+        print("Creating M matrix...")
+        M = np.zeros((len(S), self._items_count), dtype=np.float32)
+        for r, (i, k) in enumerate(S):
+            M[r, i] = 1
+            M[r, k] = 1
+        return M
 
-        # Initialize matrices
-        B = tf.Variable(tf.zeros((self._items_count, self._items_count)))
-        C = tf.Variable(tf.zeros((self._m, self._items_count)))
-        D = tf.Variable(tf.zeros((self._m, self._items_count)))
-        Gamma = tf.Variable(tf.zeros((self._m, self._items_count)))
+    def _generate_higher_order_data(self, X, M):
+        # Reference: Section 3.1 Data Representation
+        print("Generating higher-order data...")
+        M = tf.cast(M, dtype=tf.float32)  # Convert M to float32
+        Z = X @ tf.transpose(M)
+        Z = tf.where(Z >= 2.5, 1, 0)  # Apply thresholding
+        return Z
 
-        # ADMM iterations
-        for iteration in range(40):
-            print(f"ADMM Iteration: {iteration + 1}")
+    def _train_higher_order_model(self, X, Z, M):
+        # Reference: Section 3.3 Update Equations for Training
+        print("Training higher-order model using ADMM ")
+        B = self._weights
+        C = tf.zeros((self._m, self._items_count))
+        D = tf.zeros((self._m, self._items_count))
+        Gamma = tf.zeros((self._m, self._items_count))
 
-            # Update B
-            print("Updating B...")
-            B_update = tf.subtract(tf.eye(self._items_count),
-                                   P @ (tf.transpose(X) @ Z @ C - tf.linalg.diag(
-                                       tf.reduce_sum(P @ (tf.transpose(X) @ Z @ C), axis=1))))
-            B.assign(B_update)
+        for i in range(40):  # Run ADMM for 40 iterations
+            print(f"Iteration {i}...")
+            B = self._update_B(X, Z, C)
+            C = self._update_C(X, Z, B, D, Gamma)
+            D = self._update_D(C, M)
+            Gamma = self._update_Gamma(C, D, Gamma)
 
-            # Update C
-            print("Updating C...")
-            C_update = tf.linalg.inv(tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(self._m)) @ (
-                    tf.transpose(Z) @ X @ (tf.eye(self._items_count) - B) + self._rho * (D - Gamma))
-            C.assign(C_update)
+        self._weights = B
+        return C
 
-            # Update D
-            print("Updating D...")
-            D_update = tf.multiply((1 - M), C)
-            D.assign(D_update)
+    def _update_B(self, X, Z, C):
+        # Reference: Equation 10-12
+        print("Updating B matrix...")
+        P = tf.linalg.inv(tf.transpose(X) @ X + self._l2 * tf.eye(self._items_count, dtype=tf.float32))
+        B = tf.eye(self._items_count, dtype=tf.float32) - P @ (
+                tf.transpose(tf.cast(X, dtype=tf.float32)) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C, dtype=tf.float32)
+                - tf.linalg.diag(tf.reduce_sum(
+            P @ tf.transpose(tf.cast(X, dtype=tf.float32)) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C,
+                                                                                                    dtype=tf.float32),
+            axis=0))
+        )
+        B = tf.linalg.set_diag(B, tf.zeros(self._items_count, dtype=tf.float32))
+        return B
 
-            # Update Gamma
-            print("Updating Gamma...")
-            Gamma_update = Gamma + C - D
-            Gamma.assign(Gamma_update)
+    def _update_C(self, X, Z, B, D, Gamma):
+        # Reference: Equation 13
+        print("Updating C matrix...")
 
-        self._pair_weights = B
-        self._triplet_weights = C
+        # Ensure Z is cast to float32
+        Z = tf.cast(Z, dtype=tf.float32)
+
+        # Compute the left term: (Z^T @ Z + (λ_C + ρ) * I)^-1
+        left_term = tf.linalg.inv(
+            tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(
+                Z.shape[1], dtype=tf.float32)
+        )
+
+        # Compute the right term: Z^T @ X @ (I - B) + ρ * (D - Γ)
+        right_term = tf.transpose(Z) @ X @ (tf.eye(self._items_count, dtype=tf.float32) - B) + self._rho * (D - Gamma)
+
+        # Compute the updated C matrix
+        C_updated = left_term @ right_term
+
+        return C_updated
+
+    def _update_D(self, C, M):
+        # Reference: Equation 8
+        print("Updating D matrix...")
+        return (1 - M) * C
+
+    def _update_Gamma(self, C, D, Gamma):
+        # Reference: Equation 9
+        print("Updating Gamma matrix...")
+        return Gamma + C - D
 
     def predict(self, selected_items, filter_out_items, k):
-        rat = pd.DataFrame({"item": selected_items}).set_index("item", drop=False)
-        candidates = np.setdiff1d(self._all_items, rat.item.unique())
-        candidates = np.setdiff1d(candidates, filter_out_items)
+        print("Generating predictions using Higher-Order EASE model...")
 
-        if not selected_items:
-            return np.random.choice(candidates, size=k, replace=False).tolist()
-
-        indices = list(selected_items)
-        user_vector = np.zeros((self._items_count,))
-        for i in indices:
+        # Section 3.5
+        user_vector = np.zeros((self._items_count,), dtype=np.float32)
+        for i in selected_items:
             user_vector[i] = 1.0
 
-        _, Z = self._get_higher_order_data()
+        # Ensure self._M is of type float32
+        M = tf.convert_to_tensor(self._M, dtype=tf.float32)
 
-        preds = (
-                tf.tensordot(
-                    tf.convert_to_tensor(user_vector, dtype=tf.float32), self._pair_weights, 1
-                )
-                + tf.tensordot(
-            tf.convert_to_tensor(Z, dtype=tf.float32), self._triplet_weights, 1
+        # Reshape user_vector to be 2D (self._items_count, 1) for matrix multiplication
+        user_vector_2d = tf.expand_dims(user_vector, axis=-1)
+
+        # Print shapes for debugging
+        print(f"user_vector shape: {user_vector.shape}")
+        print(f"user_vector_2d shape: {user_vector_2d.shape}")
+        print(f"M shape: {M.shape}")
+
+        # Perform matrix multiplication
+        Z_u = tf.matmul(M, user_vector_2d)
+
+        # Squeeze Z_u to remove the last dimension
+        Z_u = tf.squeeze(Z_u, axis=-1)
+
+        # Print shape of Z_u for debugging
+        print(f"Z_u shape: {Z_u.shape}")
+
+        # Calculate predictions
+        preds = tf.tensordot(
+            tf.convert_to_tensor(user_vector, dtype=tf.float32), self._weights, 1
+        ) + tf.tensordot(
+            Z_u, self._C, 1
         )
-        ).numpy()
 
-        candidate_scores = np.take(preds, candidates)
-        top_indices = np.argsort(-candidate_scores)[:k]
-        result = candidates[top_indices].tolist()
+        # Print shapes for debugging
+        print(f"self._weights shape: {self._weights.shape}")
+        print(f"self._C shape: {self._C.shape}")
+        print(f"preds shape: {preds.shape}")
 
+        candidates = np.setdiff1d(self._all_items, selected_items)
+        candidates = np.setdiff1d(candidates, filter_out_items)
+
+        preds_candidates = preds.numpy()[candidates]
+        top_k_indices = np.argsort(preds_candidates)[::-1][:k]
+        result = candidates[top_k_indices].tolist()
+
+        print(f"Generated {k} predictions using Higher-Order EASE model.")
         return result
 
     @classmethod
@@ -141,35 +182,25 @@ class HigherOrderEASE(AlgorithmBase, ABC):
 
     @classmethod
     def parameters(cls):
-        return [
-            Parameter(
-                "l2_B",
-                ParameterType.FLOAT,
-                500.0,
-                help="L2-norm regularization for pairwise weights",
-            ),
+        base_params = super().parameters()
+        higher_order_params = [
             Parameter(
                 "l2_C",
                 ParameterType.FLOAT,
                 0.1,
-                help="L2-norm regularization for triplet weights",
+                help="L2-norm regularization for higher-order weight matrix C",
             ),
             Parameter(
                 "rho",
                 ParameterType.FLOAT,
-                0.1,
-                help="Penalty parameter for ADMM",
+                1.0,
+                help="Penalty parameter for ADMM optimization",
             ),
             Parameter(
                 "m",
                 ParameterType.INT,
-                500,  # Keep the number to 500 for memory to fit in
-                help="Number of triplet relations",
-            ),
-            Parameter(
-                "positive_threshold",
-                ParameterType.FLOAT,
-                2.5,
-                help="Threshold for conversion of n-ary rating into binary (positive/negative).",
+                500,
+                help="Number of higher-order relations to consider",
             ),
         ]
+        return base_params + higher_order_params
