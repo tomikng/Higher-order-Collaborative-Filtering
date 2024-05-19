@@ -114,7 +114,6 @@ class HigherOrderEASE(EASE, ABC):
         # Reference: Equation 13
         print("Updating C matrix...")
 
-        # Ensure Z is cast to float32
         Z = tf.cast(Z, dtype=tf.float32)
 
         # Compute the left term: (Z^T @ Z + (λ_C + ρ) * I)^-1
