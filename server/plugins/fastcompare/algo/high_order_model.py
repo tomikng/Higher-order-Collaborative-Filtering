@@ -18,13 +18,6 @@ class HigherOrderEASE(EASE, ABC):
         self._l2_C = l2_C
         self._rho = rho
         self._m = m
-        self._latent_dim = latent_dim
-        self._initialize_latent_factors()
-
-    def _initialize_latent_factors(self):
-        """Initialize the latent factors for the triplet interactions."""
-        self._nu = np.random.normal(size=(self._items_count, self._latent_dim)).astype(np.float32)
-        self._gamma = np.random.normal(size=(self._items_count, self._latent_dim)).astype(np.float32)
 
     def fit(self):
         print("Training Higher-Order EASE model...")
