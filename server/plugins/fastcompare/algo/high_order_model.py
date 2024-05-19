@@ -37,17 +37,33 @@ class HigherOrderEASE(EASE, ABC):
         print("Higher-Order EASE model trained successfully.")
 
     def _select_higher_order_relations(self, item_item_matrix, m):
-        # Reference: Section 5.1 Experimental Protocols
-        print(f"Selecting {m} higher-order relations...")
+        """Selects the top m higher-order relations based on the item-item co-occurrence matrix."""
+
+        item_item_matrix = item_item_matrix.numpy()
+
         upper_tri_indices = np.triu_indices(self._items_count, k=1)
-        upper_tri_indices = tf.convert_to_tensor(upper_tri_indices, dtype=tf.int64)  # Convert to TensorFlow tensor
-        item_item_scores = tf.gather_nd(item_item_matrix, tf.transpose(upper_tri_indices))  # Use tf.gather_nd to index
-        top_indices = tf.argsort(item_item_scores, direction='DESCENDING')[:m]
-        top_item_pairs = tf.gather(tf.transpose(upper_tri_indices), top_indices)
-        return set(tuple(pair.numpy()) for pair in top_item_pairs)
+
+        upper_tri_values = item_item_matrix[upper_tri_indices]
+
+        threshold_value = np.partition(upper_tri_values, -m)[-m]
+
+        # Select the item pairs that meet or exceed the threshold
+        selected_pairs_indices = np.where(upper_tri_values >= threshold_value)
+
+        # Gather the corresponding upper triangular indices for the selected pairs
+        selected_pairs = set(
+            (int(upper_tri_indices[0][idx]), int(upper_tri_indices[1][idx]))
+            for idx in selected_pairs_indices[0]
+        )
+
+        print(f"Selected {len(selected_pairs)} higher-order relations.")
+
+        return selected_pairs
 
     def _create_M_matrix(self, S):
-        # Reference: Section 3.1 Data Representation
+        """
+        Creates the M matrix from the set of selected higher-order relations S.
+        """
         print("Creating M matrix...")
         M = np.zeros((len(S), self._items_count), dtype=np.float32)
         for r, (i, k) in enumerate(S):
@@ -58,18 +74,18 @@ class HigherOrderEASE(EASE, ABC):
     def _generate_higher_order_data(self, X, M):
         # Reference: Section 3.1 Data Representation
         print("Generating higher-order data...")
-        M = tf.cast(M, dtype=tf.float32)  # Convert M to float32
-        Z = X @ tf.transpose(M)
+        M = tf.convert_to_tensor(M, dtype=tf.float32)  # Convert M to float32
+        Z = tf.matmul(X, tf.transpose(M))
         Z = tf.where(Z >= 2.5, 1, 0)  # Apply thresholding
         return Z
 
     def _train_higher_order_model(self, X, Z, M):
         # Reference: Section 3.3 Update Equations for Training
-        print("Training higher-order model using ADMM ")
+        print("Training higher-order model using ADMM")
         B = self._weights
-        C = tf.zeros((self._m, self._items_count))
-        D = tf.zeros((self._m, self._items_count))
-        Gamma = tf.zeros((self._m, self._items_count))
+        C = tf.zeros((M.shape[0], self._items_count), dtype=tf.float32)
+        D = tf.zeros((M.shape[0], self._items_count), dtype=tf.float32)
+        Gamma = tf.zeros((M.shape[0], self._items_count), dtype=tf.float32)
 
         for i in range(40):  # Run ADMM for 40 iterations
             print(f"Iteration {i}...")
@@ -86,10 +102,9 @@ class HigherOrderEASE(EASE, ABC):
         print("Updating B matrix...")
         P = tf.linalg.inv(tf.transpose(X) @ X + self._l2 * tf.eye(self._items_count, dtype=tf.float32))
         B = tf.eye(self._items_count, dtype=tf.float32) - P @ (
-                tf.transpose(tf.cast(X, dtype=tf.float32)) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C, dtype=tf.float32)
+                tf.transpose(X) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C, dtype=tf.float32)
                 - tf.linalg.diag(tf.reduce_sum(
-            P @ tf.transpose(tf.cast(X, dtype=tf.float32)) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C,
-                                                                                                    dtype=tf.float32),
+            P @ tf.transpose(X) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C, dtype=tf.float32),
             axis=0))
         )
         B = tf.linalg.set_diag(B, tf.zeros(self._items_count, dtype=tf.float32))
@@ -104,8 +119,7 @@ class HigherOrderEASE(EASE, ABC):
 
         # Compute the left term: (Z^T @ Z + (λ_C + ρ) * I)^-1
         left_term = tf.linalg.inv(
-            tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(
-                Z.shape[1], dtype=tf.float32)
+            tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(Z.shape[1], dtype=tf.float32)
         )
 
         # Compute the right term: Z^T @ X @ (I - B) + ρ * (D - Γ)
@@ -193,7 +207,7 @@ class HigherOrderEASE(EASE, ABC):
             Parameter(
                 "rho",
                 ParameterType.FLOAT,
-                1.0,
+                10.0,
                 help="Penalty parameter for ADMM optimization",
             ),
             Parameter(
