@@ -163,7 +163,7 @@ class HigherOrderEASE(EASE, ABC):
         candidate_items = np.setdiff1d(candidate_items, filter_out_items)
 
         # Get predicted scores for candidate items
-        candidate_scores = preds.numpy()[0, candidate_items] # Extract scores from the row vector
+        candidate_scores = preds.numpy()[0, candidate_items]
 
         # Get indices of top-k items
         top_k_indices = np.argsort(candidate_scores)[::-1][:k]
@@ -196,12 +196,6 @@ class HigherOrderEASE(EASE, ABC):
                 ParameterType.INT,
                 500,
                 help="Number of higher-order relations to consider",
-            ),
-            Parameter(
-                "latent_dim",
-                ParameterType.INT,
-                10,
-                help="Dimensionality of the latent factors for triplet interactions",
             ),
         ]
         return base_params + higher_order_params
