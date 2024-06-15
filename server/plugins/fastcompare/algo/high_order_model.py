@@ -3,7 +3,7 @@ from scipy import sparse
 import pandas as pd
 from copy import deepcopy
 from abc import ABC
-from plugins.fastcompare.algo.algorithm_base import (
+from server.plugins.fastcompare.algo.algorithm_base import (
     AlgorithmBase,
     Parameter,
     ParameterType,
@@ -112,7 +112,6 @@ class HigherOrderCollaborativeFiltering(AlgorithmBase, ABC):
         candidates_by_prob = sorted(((preds[cand], cand) for cand in candidates), reverse=True)
         result = [x for _, x in candidates_by_prob][:k]
 
-        print(f"Prediction completed: {result}")
         return result
 
     @classmethod
