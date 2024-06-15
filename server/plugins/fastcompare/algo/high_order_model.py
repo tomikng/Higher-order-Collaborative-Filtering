@@ -117,12 +117,12 @@ class HigherOrderCollaborativeFiltering(AlgorithmBase, ABC):
 
     @classmethod
     def name(cls):
-        return "HigherOrderCollaborativeFiltering"
+        return "Higher Order CF"
 
     @classmethod
     def parameters(cls):
         return [
-            Parameter("threshold", ParameterType.FLOAT, 100000, help="Threshold for feature pair creation"),
+            Parameter("threshold", ParameterType.FLOAT, 100000, help="Threshold for feature pair creation"),  # Adjusted to have cca 500 pairs
             Parameter("lambdaBB", ParameterType.FLOAT, 500, help="Lambda parameter for BB regularization"),
             Parameter("lambdaCC", ParameterType.FLOAT, 2000, help="Lambda parameter for CC regularization"),
             Parameter("rho", ParameterType.FLOAT, 30000, help="Rho parameter for CC regularization"),
@@ -146,32 +146,16 @@ class HigherOrderCollaborativeFiltering(AlgorithmBase, ABC):
             print("No feature pairs found, Z will be empty")
             return np.zeros((0, X.shape[1]), dtype=np.float64), np.zeros((0, X.shape[1]), dtype=np.float64)
 
-        print(f"Number of feature pairs: {len(ii_pairs[0])}")
-
         MM = np.zeros((len(ii_pairs[0]), X.shape[1]), dtype=np.float64)
-        print(f"MM initialized with shape: {MM.shape}")
-
         MM[np.arange(MM.shape[0]), ii_pairs[0]] = 1.0
-        print("Filled MM with first set of indices")
-
         MM[np.arange(MM.shape[0]), ii_pairs[1]] = 1.0
-        print("Filled MM with second set of indices")
 
         CCmask = 1.0 - MM
-        print("Computed CCmask")
-
         MM = sparse.csc_matrix(MM.T)
-        print(f"Converted MM to sparse matrix with shape: {MM.shape}")
 
         Z = X @ MM
-        print(f"Performed matrix multiplication, resulting Z shape: {Z.shape}")
-
         Z = (Z == 2.0)
-        print("Converted Z to binary matrix based on threshold")
-
         Z = Z * 1.0
-        print(f"Converted Z to float matrix, final Z shape: {Z.shape}")
-
         print(f"Matrix Z created with shape: {Z.shape}")
         print(f"CCmask created with shape: {CCmask.shape}")
 
