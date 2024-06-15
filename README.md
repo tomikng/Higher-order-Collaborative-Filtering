@@ -1,5 +1,7 @@
-# About
+# About HIGH ORDER EASE
+based on paper Negative Interactions for Improved Collaborative Don’t go Deeper, go Higher.
 
+This solution also includes notebook to evaluate the results of the study. The notebook is located in the [notebooks](./notebooks) directory.
 
 # About EasyStudy
 A framework for quick & easy deployment of customizable RS user studies. The framework is modular, highly extensible and easy to use. It offers out-of-the-box functionality for all phases of the user study, i.e., data loading and presentation, preference elicitation, baseline recommending algorithms as well as result comparison layouts. It also features a  *fastcompare* plugin implementing the most common study flow, i.e., comparing perceived utility of several personalized recommenders.
