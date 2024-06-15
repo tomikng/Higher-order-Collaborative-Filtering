@@ -1,199 +1,214 @@
-from abc import ABC
 import numpy as np
-import tensorflow as tf
+from scipy import sparse
 import pandas as pd
+from copy import deepcopy
+from abc import ABC
+from plugins.fastcompare.algo.algorithm_base import (
+    AlgorithmBase,
+    Parameter,
+    ParameterType,
+)
 
-from server.plugins.fastcompare.algo.algorithm_base import ParameterType, Parameter
-from server.plugins.fastcompare.algo.ease import EASE
 
+class HigherOrderCollaborativeFiltering(AlgorithmBase, ABC):
+    def __init__(self, loader, threshold, lambdaBB, lambdaCC, rho, epochs, **kwargs):
+        print("Initializing HigherOrderCollaborativeFiltering")
+        self._ratings_df = loader.ratings_df
+        self._loader = loader
+        self._all_items = self._ratings_df['item'].unique()
 
-class HigherOrderEASE(EASE, ABC):
-    """Implementation of Higher-Order EASE algorithm for EasyStudy using ADMM optimization
-    paper: https://dl.acm.org/doi/pdf/10.1145/3460231.3474273
-    """
+        # Select a subset of users for training
+        # self._ratings_df, self._unique_uid, self._unique_sid = self.prepare_training_data(self._ratings_df)
 
-    def __init__(self, loader, positive_threshold, l2, l2_C, rho, m, latent_dim=10, **kwargs):
-        super().__init__(loader, positive_threshold, l2, **kwargs)
-        self._M = None
-        self._C = None
-        self._l2_C = l2_C
+        self._rating_matrix = self.create_rating_matrix(self._ratings_df)
+        self._threshold = threshold
+        self._lambdaBB = lambdaBB
+        self._lambdaCC = lambdaCC
         self._rho = rho
-        self._m = m
+        self._epochs = epochs
+
+        self._items_count = np.shape(self._rating_matrix)[1]
+
+        self._XtX = None
+        self._XtXdiag = None
+        self._BB = None
+        self._CC = None
+
+    def create_rating_matrix(self, ratings_df):
+        print("Creating rating matrix")
+        rating_matrix = (
+            ratings_df.pivot(index="user", columns="item", values="rating")
+            .fillna(0)
+            .values
+        )
+        return rating_matrix
 
     def fit(self):
-        print("Training Higher-Order EASE model...")
-        super().fit()
+        print("Starting fit process")
+        X = self._rating_matrix
+        self._XtX = X.T @ X
+        self._XtXdiag = deepcopy(np.diag(self._XtX))
+        self._XtX[np.diag_indices(self._XtX.shape[0])] = self._XtXdiag
 
-        # Reference: Section 3.1 Data Representation
-        X = tf.convert_to_tensor(
-            np.where(self._rating_matrix >= self._threshold, 1, 0), dtype=tf.float32
-        )
-        item_item_matrix = tf.transpose(X) @ X
-        S = self._select_higher_order_relations(item_item_matrix, self._m)
-        self._M = self._create_M_matrix(S)
+        print("Creating list of feature pairs")
+        ii_feature_pairs = self.create_list_feature_pairs(self._XtX, self._threshold)
+        print(f"Number of feature pairs: {len(ii_feature_pairs[0])}")
 
-        # Reference: Section 3.2 Training Objective and Section 3.3 Update Equations for Training
-        Z = self._generate_higher_order_data(X, self._M)
-        self._C = self._train_higher_order_model(X, Z, self._M)
-        print("Higher-Order EASE model trained successfully.")
+        print("Creating matrix Z and CCmask")
+        Z, CCmask = self.create_matrix_Z(ii_feature_pairs, X)
+        print(f"Matrix Z shape: {Z.shape}, CCmask shape: {CCmask.shape}")
 
-    def _select_higher_order_relations(self, item_item_matrix, m):
-        """Selects the top m higher-order relations based on the item-item co-occurrence matrix."""
+        if Z.shape[0] == 0:  # Handle empty Z case
+            self._BB = np.zeros((self._XtX.shape[0], self._XtX.shape[1]), dtype=np.float64)
+            self._CC = np.zeros((0, self._XtX.shape[0]), dtype=np.float64)
+            print("No feature pairs found, returning zero matrices for BB and CC")
+            return
 
-        item_item_matrix = item_item_matrix.numpy()
+        print("Creating higher-order matrices")
+        ZtZ = Z.T @ Z
+        ZtX = Z.T @ X
+        ZtZdiag = deepcopy(np.diag(ZtZ))
 
-        upper_tri_indices = np.triu_indices(self._items_count, k=1)
-
-        upper_tri_values = item_item_matrix[upper_tri_indices]
-
-        threshold_value = np.partition(upper_tri_values, -m)[-m]
-
-        # Select the item pairs that meet or exceed the threshold
-        selected_pairs_indices = np.where(upper_tri_values >= threshold_value)
-
-        # Gather the corresponding upper triangular indices for the selected pairs
-        selected_pairs = set(
-            (int(upper_tri_indices[0][idx]), int(upper_tri_indices[1][idx]))
-            for idx in selected_pairs_indices[0]
-        )
-
-        print(f"Selected {len(selected_pairs)} higher-order relations.")
-
-        return selected_pairs
-
-    def _create_M_matrix(self, S):
-        print("Creating M matrix...")
-        M = np.zeros((len(S), self._items_count), dtype=np.float32)
-        for r, (i, k) in enumerate(S):
-            M[r, i] = 1
-            M[r, k] = 1
-        return M
-
-    def _generate_higher_order_data(self, X, M):
-        # Reference: Section 3.1 Data Representation
-        print("Generating higher-order data...")
-        M = tf.convert_to_tensor(M, dtype=tf.float32)  # Convert M to float32
-        Z = tf.matmul(X, tf.transpose(M))
-        Z = tf.where(Z >= 2, 1, 0)  # Apply thresholding
-        return Z
-
-    def _train_higher_order_model(self, X, Z, M):
-        # Reference: Section 3.3 Update Equations for Training
-        print("Training higher-order model using ADMM")
-        B = self._weights
-        C = tf.zeros((M.shape[0], self._items_count), dtype=tf.float32)
-        D = tf.zeros((M.shape[0], self._items_count), dtype=tf.float32)
-        Gamma = tf.zeros((M.shape[0], self._items_count), dtype=tf.float32)
-
-        for i in range(40):  # Run ADMM for 40 iterations
-            print(f"Iteration {i}...")
-            B = self._update_B(X, Z, C)
-            C = self._update_C(X, Z, B, D, Gamma)
-            D = self._update_D(C, M)
-            Gamma = self._update_Gamma(C, D, Gamma)
-
-        self._weights = B
-        return C
-
-    def _update_B(self, X, Z, C):
-        # Reference: Equation 10-12
-        print("Updating B matrix...")
-        P = tf.linalg.inv(tf.transpose(X) @ X + self._l2 * tf.eye(self._items_count, dtype=tf.float32))
-        B = tf.eye(self._items_count, dtype=tf.float32) - P @ (
-                tf.transpose(X) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C, dtype=tf.float32)
-                - tf.linalg.diag(tf.reduce_sum(
-            P @ tf.transpose(X) @ tf.cast(Z, dtype=tf.float32) @ tf.cast(C, dtype=tf.float32),
-            axis=0))
-        )
-        B = tf.linalg.set_diag(B, tf.zeros(self._items_count, dtype=tf.float32))
-        return B
-
-    def _update_C(self, X, Z, B, D, Gamma):
-        # Reference: Equation 13
-        print("Updating C matrix...")
-
-        Z = tf.cast(Z, dtype=tf.float32)
-
-        # Compute the left term: (Z^T @ Z + (λ_C + ρ) * I)^-1
-        left_term = tf.linalg.inv(
-            tf.transpose(Z) @ Z + (self._l2_C + self._rho) * tf.eye(Z.shape[1], dtype=tf.float32)
-        )
-
-        # Compute the right term: Z^T @ X @ (I - B) + ρ * (D - Γ)
-        right_term = tf.transpose(Z) @ X @ (tf.eye(self._items_count, dtype=tf.float32) - B) + self._rho * (D - Gamma)
-
-        # Compute the updated C matrix
-        C_updated = left_term @ right_term
-
-        return C_updated
-
-    def _update_D(self, C, M):
-        # Reference: Equation 8
-        print("Updating D matrix...")
-        return (1 - M) * C
-
-    def _update_Gamma(self, C, D, Gamma):
-        # Reference: Equation 9
-        print("Updating Gamma matrix...")
-        return Gamma + C - D
+        print("Training higher-order model")
+        self._BB, self._CC = self.train_higher(self._XtX, self._XtXdiag, self._lambdaBB, ZtZ, ZtZdiag, self._lambdaCC,
+                                               CCmask, ZtX, self._rho, self._epochs)
+        print(f"Fit process completed with BB shape: {self._BB.shape} and CC shape: {self._CC.shape}")
 
     def predict(self, selected_items, filter_out_items, k):
-        print("Generating predictions using Higher-Order EASE model...")
+        print("Starting prediction")
         rat = pd.DataFrame({"item": selected_items}).set_index("item", drop=False)
-
-        # Filter out seen and excluded items
         candidates = np.setdiff1d(self._all_items, rat.item.unique())
         candidates = np.setdiff1d(candidates, filter_out_items)
-
-        # If no items selected, return random candidates
         if not selected_items:
+            print("No items selected, returning random candidates")
             return np.random.choice(candidates, size=k, replace=False).tolist()
-        user_vector = np.zeros((self._items_count,), dtype=np.float32)
+
         indices = list(selected_items)
+        user_vector = np.zeros((self._items_count,))
         for i in indices:
             user_vector[i] = 1.0
 
-        pairwise_preds = np.dot(user_vector, self._weights)
+        print(f"user_vector shape: {user_vector.shape}")
+        print(f"self._BB shape: {self._BB.shape}")
+        print(f"self._CC shape: {self._CC.shape}")
 
-        # Compute higher-order predictions
-        Z_u = np.dot(user_vector, self._M.T) >= 2
-        higher_order_preds = np.dot(Z_u.astype(np.float32), self._C)
+        if user_vector.shape[0] != self._BB.shape[0]:
+            raise ValueError(
+                f"Incompatible shapes for user_vector and self._BB: {user_vector.shape[0]} != {self._BB.shape[0]}")
+        if self._CC.shape[0] == 0:
+            raise ValueError("self._CC is empty. Check the fit method for proper initialization and training.")
+        if user_vector.shape[0] != self._CC.shape[1]:
+            raise ValueError(
+                f"Incompatible shapes for user_vector and self._CC: {user_vector.shape[0]} != {self._CC.shape[1]}")
 
-        # Combine pairwise and higher-order predictions
-        preds = pairwise_preds + higher_order_preds
+        preds_pairwise = user_vector @ self._BB
+        preds_higher_order = user_vector @ self._CC.T
 
-        candidates_by_prob = sorted(
-            ((preds[cand], cand) for cand in candidates), reverse=True
-        )
+        preds_higher_order_resized = np.resize(preds_higher_order, preds_pairwise.shape)
+
+        preds = preds_pairwise + preds_higher_order_resized
+        preds[user_vector.nonzero()] = -np.inf
+
+        candidates_by_prob = sorted(((preds[cand], cand) for cand in candidates), reverse=True)
         result = [x for _, x in candidates_by_prob][:k]
 
+        print(f"Prediction completed: {result}")
         return result
 
     @classmethod
     def name(cls):
-        return "Higher-Order EASE"
+        return "HigherOrderCollaborativeFiltering"
 
     @classmethod
     def parameters(cls):
-        base_params = super().parameters()
-        higher_order_params = [
-            Parameter(
-                "l2_C",
-                ParameterType.FLOAT,
-                0.1,
-                help="L2-norm regularization for higher-order weight matrix C",
-            ),
-            Parameter(
-                "rho",
-                ParameterType.FLOAT,
-                10.0,
-                help="Penalty parameter for ADMM optimization",
-            ),
-            Parameter(
-                "m",
-                ParameterType.INT,
-                500,
-                help="Number of higher-order relations to consider",
-            ),
+        return [
+            Parameter("threshold", ParameterType.FLOAT, 100000, help="Threshold for feature pair creation"),
+            Parameter("lambdaBB", ParameterType.FLOAT, 500, help="Lambda parameter for BB regularization"),
+            Parameter("lambdaCC", ParameterType.FLOAT, 2000, help="Lambda parameter for CC regularization"),
+            Parameter("rho", ParameterType.FLOAT, 30000, help="Rho parameter for CC regularization"),
+            Parameter("epochs", ParameterType.INT, 40, help="Number of epochs for training")
         ]
-        return base_params + higher_order_params
+
+    @staticmethod
+    def create_list_feature_pairs(XtX, threshold):
+        print("Creating list of feature pairs")
+        AA = np.triu(np.abs(XtX))
+        AA[np.diag_indices(AA.shape[0])] = 0.0
+        ii_pairs = np.where((AA > threshold) == True)
+        print(f"Number of feature pairs created: {len(ii_pairs[0])}")
+        return ii_pairs
+
+    @staticmethod
+    def create_matrix_Z(ii_pairs, X):
+        print("Starting create_matrix_Z")
+
+        if len(ii_pairs[0]) == 0:
+            print("No feature pairs found, Z will be empty")
+            return np.zeros((0, X.shape[1]), dtype=np.float64), np.zeros((0, X.shape[1]), dtype=np.float64)
+
+        print(f"Number of feature pairs: {len(ii_pairs[0])}")
+
+        MM = np.zeros((len(ii_pairs[0]), X.shape[1]), dtype=np.float64)
+        print(f"MM initialized with shape: {MM.shape}")
+
+        MM[np.arange(MM.shape[0]), ii_pairs[0]] = 1.0
+        print("Filled MM with first set of indices")
+
+        MM[np.arange(MM.shape[0]), ii_pairs[1]] = 1.0
+        print("Filled MM with second set of indices")
+
+        CCmask = 1.0 - MM
+        print("Computed CCmask")
+
+        MM = sparse.csc_matrix(MM.T)
+        print(f"Converted MM to sparse matrix with shape: {MM.shape}")
+
+        Z = X @ MM
+        print(f"Performed matrix multiplication, resulting Z shape: {Z.shape}")
+
+        Z = (Z == 2.0)
+        print("Converted Z to binary matrix based on threshold")
+
+        Z = Z * 1.0
+        print(f"Converted Z to float matrix, final Z shape: {Z.shape}")
+
+        print(f"Matrix Z created with shape: {Z.shape}")
+        print(f"CCmask created with shape: {CCmask.shape}")
+
+        return Z, CCmask
+
+    @staticmethod
+    def train_higher(XtX, XtXdiag, lambdaBB, ZtZ, ZtZdiag, lambdaCC, CCmask, ZtX, rho, epochs):
+        print("Starting training of higher-order model")
+        ii_diag = np.diag_indices(XtX.shape[0])
+        XtX[ii_diag] = XtXdiag + lambdaBB
+        PP = np.linalg.inv(XtX)
+
+        ii_diag_ZZ = np.diag_indices(ZtZ.shape[0])
+        ZtZ[ii_diag_ZZ] = ZtZdiag + lambdaCC + rho
+        QQ = np.linalg.inv(ZtZ)
+
+        BB = np.zeros((XtX.shape[0], XtX.shape[1]), dtype=np.float64)
+        if ZtZ.shape[0] == 0:
+            print("ZtZ is empty, returning zero matrices")
+            return BB, np.zeros((0, XtX.shape[0]), dtype=np.float64)
+
+        CC = np.zeros((ZtZ.shape[0], XtX.shape[0]), dtype=np.float64)
+        DD = np.zeros((ZtZ.shape[0], XtX.shape[0]), dtype=np.float64)
+        UU = np.zeros((ZtZ.shape[0], XtX.shape[0]), dtype=np.float64)
+
+        for iter in range(epochs):
+            print(f"Epoch {iter}")
+            XtX[ii_diag] = XtXdiag
+            BB = PP.dot(XtX - ZtX.T @ CC)
+            gamma = np.diag(BB) / np.diag(PP)
+            BB -= PP * gamma[:, None]
+
+            CC = QQ.dot(ZtX - ZtX @ BB + rho * (DD - UU))
+            DD = CC * CCmask
+            UU += CC - DD
+
+            print(f"End of epoch {iter} - CC shape: {CC.shape}, DD shape: {DD.shape}, UU shape: {UU.shape}")
+
+        print("Training completed")
+        return BB, DD
